@@ -430,8 +430,14 @@ impl DrmDevice {
     pub fn activate(&mut self, disable_connectors: bool) -> Result<(), Error> {
         if self.device_fd().is_privileged() {
             if let Err(err) = self.acquire_master_lock() {
-                error!("Failed to acquire drm master on activate. Error: {}", err);
-                return Err(Error::DrmMasterFailed);
+                // SET_MASTER can fail with EACCES on Linux >= 5.8 for fds
+                // received from logind even when the fd already holds master
+                // (e.g. re-acquired by logind on session activation); only
+                // fail if we genuinely are not master.
+                if !self.device_fd().is_drm_master() {
+                    error!("Failed to acquire drm master on activate. Error: {}", err);
+                    return Err(Error::DrmMasterFailed);
+                }
             }
         }
         if !self.set_active(true) && disable_connectors {

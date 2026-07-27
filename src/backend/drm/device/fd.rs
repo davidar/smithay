@@ -5,6 +5,24 @@ use std::{
 };
 use tracing::{error, info, warn};
 
+/// Equivalent of libdrm's `drmIsMaster()`: `DRM_IOCTL_AUTH_MAGIC` is a
+/// master-only ioctl, so probing it with a bogus magic yields EINVAL when the
+/// fd holds drm master (the magic was actually looked up) and EACCES when it
+/// does not. Unlike `DRM_IOCTL_SET_MASTER` it is not restricted by
+/// `drm_master_check_perm()` on Linux >= 5.8, so it works on fds received
+/// from logind.
+fn is_drm_master_fd(fd: RawFd) -> bool {
+    #[repr(C)]
+    struct DrmAuth {
+        magic: libc::c_uint,
+    }
+    const DRM_IOCTL_AUTH_MAGIC: libc::c_ulong = 0x4004_6411; // _IOW('d', 0x11, drm_auth)
+    let mut auth = DrmAuth { magic: 0 };
+    // SAFETY: ioctl on a valid fd with a properly sized out-parameter.
+    let ret = unsafe { libc::ioctl(fd, DRM_IOCTL_AUTH_MAGIC as _, &mut auth) };
+    ret == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL)
+}
+
 use crate::utils::{DevPath, DeviceFd};
 
 #[derive(Debug)]
@@ -72,12 +90,15 @@ impl DrmDeviceFd {
         };
 
         // We want to modeset, so we better be the master, if we run via a tty session.
-        // This is only needed on older kernels. Newer kernels grant this permission,
-        // if no other process is already the *master*. So we skip over this error.
-        if dev.acquire_master_lock().is_err() {
-            warn!("Unable to become drm master, assuming unprivileged mode");
-        } else {
+        // Newer kernels grant this permission, if no other process is already the
+        // *master*, but since Linux 5.8 DRM_IOCTL_SET_MASTER is also refused with
+        // EACCES (drm_master_check_perm) for fds opened by another process — e.g.
+        // received from logind via TakeDevice — even when the fd *already holds*
+        // master. Probe the actual master status before assuming we are unprivileged.
+        if dev.acquire_master_lock().is_ok() || is_drm_master_fd(dev.fd.as_raw_fd()) {
             dev.privileged = true;
+        } else {
+            warn!("Unable to become drm master, assuming unprivileged mode");
         }
 
         DrmDeviceFd(Arc::new(dev))
@@ -85,6 +106,10 @@ impl DrmDeviceFd {
 
     pub(in crate::backend::drm) fn is_privileged(&self) -> bool {
         self.0.privileged
+    }
+
+    pub(in crate::backend::drm) fn is_drm_master(&self) -> bool {
+        is_drm_master_fd(self.0.fd.as_raw_fd())
     }
 
     /// Returns the underlying `DeviceFd`
