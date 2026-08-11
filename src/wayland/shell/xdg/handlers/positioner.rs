@@ -45,7 +45,9 @@ where
                 }
             }
             xdg_positioner::Request::SetAnchorRect { x, y, width, height } => {
-                if width < 1 || height < 1 {
+                // The stable xdg-shell spec only forbids negative sizes here; a
+                // zero-size anchor rect (anchoring to a point or line) is valid.
+                if width < 0 || height < 0 {
                     positioner.post_error(
                         xdg_positioner::Error::InvalidInput,
                         "Invalid size for positioner's anchor rectangle.",
